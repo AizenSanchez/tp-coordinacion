@@ -22,11 +22,14 @@ class JoinFilter:
         self.output_queue = middleware.MessageMiddlewareQueueRabbitMQ(
             MOM_HOST, OUTPUT_QUEUE
         )
+        self.top_by_client = {}
 
     def process_messsage(self, message, ack, nack):
         logging.info("Received top")
         [client_uuid, fruit_top] = message_protocol.internal.deserialize(message)
-        self.output_queue.send(message_protocol.internal.serialize([client_uuid, fruit_top]))
+        if client_uuid not in self.top_by_client:
+            self.top_by_client[client_uuid] = (fruit_top, 1)
+            self.output_queue.send(message_protocol.internal.serialize([client_uuid, fruit_top]))        
         ack()
 
     def start(self):
