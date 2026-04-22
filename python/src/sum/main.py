@@ -1,5 +1,6 @@
 import os
 import logging
+import hashlib
 import threading
 import pika
 from common import middleware, message_protocol, fruit_item
@@ -39,14 +40,16 @@ class SumFilter:
         ) + fruit_item.FruitItem(fruit, int(amount))
 
     def _process_eof(self, client_uuid):
-        logging.info(f"Broadcasting data messages")
-        for (client_uuid, _),final_fruit_item in self.amount_by_fruit.items():
-            for data_output_exchange in self.data_output_exchanges:
-                data_output_exchange.send(
-                    message_protocol.internal.serialize(
-                        [client_uuid,final_fruit_item.fruit, final_fruit_item.amount]
-                    )
+        logging.info(f"Routing data messages")
+        for (current_client_uuid, _), final_fruit_item in self.amount_by_fruit.items():
+            data_output_exchange = self._select_data_output_exchange(
+                current_client_uuid, final_fruit_item.fruit
+            )
+            data_output_exchange.send(
+                message_protocol.internal.serialize(
+                    [current_client_uuid, final_fruit_item.fruit, final_fruit_item.amount]
                 )
+            )
 
         logging.info(f"Broadcasting EOF message")
         for data_output_exchange in self.data_output_exchanges:
@@ -71,6 +74,12 @@ class SumFilter:
     def _process_eof_client(self, client_uuid):
         logging.info(f"Broadcasting EOF message to sums")
         self.control_exchange.send(message_protocol.internal.serialize([client_uuid]))
+
+    def _select_data_output_exchange(self, client_uuid, fruit):
+        hash_input = f"{client_uuid}:{fruit}".encode("utf-8")
+        hash_value = int(hashlib.sha256(hash_input).hexdigest(), 16)
+        selected_index = hash_value % AGGREGATION_AMOUNT
+        return self.data_output_exchanges[selected_index]
 
     def start(self):
         self.input_queue.start_consuming(self.process_data_messsage, self.process_control_message, self.control_exchange.get_queue_name())

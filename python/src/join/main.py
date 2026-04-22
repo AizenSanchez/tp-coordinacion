@@ -1,6 +1,7 @@
 import os
 import logging
-
+import heapq
+import sys
 from common import middleware, message_protocol, fruit_item
 
 MOM_HOST = os.environ["MOM_HOST"]
@@ -22,19 +23,42 @@ class JoinFilter:
         self.output_queue = middleware.MessageMiddlewareQueueRabbitMQ(
             MOM_HOST, OUTPUT_QUEUE
         )
-        self.top_by_client = {}
+        self.top_by_client = {}        
 
     def process_messsage(self, message, ack, nack):
         logging.info("Received top")
         [client_uuid, fruit_top] = message_protocol.internal.deserialize(message)
         if client_uuid not in self.top_by_client:
             self.top_by_client[client_uuid] = (fruit_top, 1)
-            self.output_queue.send(message_protocol.internal.serialize([client_uuid, fruit_top]))        
+        else:
+            current_top, count = self.top_by_client[client_uuid]
+            merged_top = self._merge_tops(current_top, fruit_top)
+            self.top_by_client[client_uuid] = (merged_top, count + 1)
+        
+        if self.top_by_client[client_uuid][1] == AGGREGATION_AMOUNT:
+            fruit_top = self.top_by_client[client_uuid][0]
+            self.output_queue.send(message_protocol.internal.serialize([client_uuid, fruit_top]))
         ack()
 
     def start(self):
         self.input_queue.start_consuming(self.process_messsage)
 
+    def _merge_tops(self, top1, top2):
+        result = []
+        result = self._add_to_heap(result, top1)
+        result = self._add_to_heap(result, top2)
+        result = list(map(lambda fruit_item: (fruit_item.fruit, fruit_item.amount), [heapq.heappop(result) for _ in range(min(TOP_SIZE, len(result)))]))
+        result.reverse()
+        return result
+    
+    def _add_to_heap(self, heap, list_of_fruits):
+        for fruit, amount in list_of_fruits:
+            if len(heap) < TOP_SIZE:
+                heapq.heappush(heap, fruit_item.FruitItem(fruit, amount))
+            else:
+                heapq.heappushpop(heap, fruit_item.FruitItem(fruit, amount))
+        return heap
+    
 
 def main():
     logging.basicConfig(level=logging.INFO)
