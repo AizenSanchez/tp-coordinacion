@@ -1,9 +1,10 @@
 import os
 import logging
-import hashlib
 import threading
-import pika
 from common import middleware, message_protocol, fruit_item
+import signal
+
+from sum_control_layer import SumControlLayer
 
 ID = int(os.environ["ID"])
 MOM_HOST = os.environ["MOM_HOST"]
@@ -16,74 +17,53 @@ AGGREGATION_PREFIX = os.environ["AGGREGATION_PREFIX"]
 
 class SumFilter:
     def __init__(self):
-        connection = pika.BlockingConnection(pika.ConnectionParameters(host=MOM_HOST))
-        channel = connection.channel()
-        channel.basic_qos(prefetch_count=1)
+        #signal.signal(signal.SIGTERM, self.close)
         self.input_queue = middleware.MessageMiddlewareQueueRabbitMQ(
-            MOM_HOST, INPUT_QUEUE, channel
+            MOM_HOST, INPUT_QUEUE
         )
-        self.data_output_exchanges = []
-        for i in range(AGGREGATION_AMOUNT):
-            data_output_exchange = middleware.MessageMiddlewareExchangeRabbitMQ(
-                MOM_HOST, AGGREGATION_PREFIX, [f"{AGGREGATION_PREFIX}_{i}"]
-            )
-            self.data_output_exchanges.append(data_output_exchange)
-        self.amount_by_fruit = {}
-        self.control_exchange = middleware.MessageMiddlewareExchangeRabbitMQ(
-            MOM_HOST, SUM_CONTROL_EXCHANGE, [SUM_CONTROL_EXCHANGE], channel, connection
+        self.dict_data: dict[str, tuple[dict[str, fruit_item.FruitItem], int]] = {}
+        self.dict_data_lock = threading.Lock()
+        self.thread_control = threading.Thread(target=self._control_thread)
+        self.thread_control.start()
+        self.control_output_exchange = middleware.MessageMiddlewareExchangeRabbitMQ(
+            MOM_HOST, SUM_CONTROL_EXCHANGE, [f"{SUM_CONTROL_EXCHANGE}_{ID}"]
         )
-
+    
     def _process_data(self, client_uuid,fruit, amount):
         logging.info(f"Process data")
-        self.amount_by_fruit[(client_uuid,fruit)] = self.amount_by_fruit.get(
-            (client_uuid, fruit), fruit_item.FruitItem(fruit, 0)
-        ) + fruit_item.FruitItem(fruit, int(amount))
+        self.dict_data_lock.acquire()
+        if client_uuid not in self.dict_data:
+            self.dict_data[client_uuid] = ({}, 0)
+        (dict_by_client, count_message) = self.dict_data[client_uuid]       
+        dict_by_client[fruit] = dict_by_client.get(fruit, fruit_item.FruitItem(fruit, 0)) + fruit_item.FruitItem(fruit, int(amount))
+        self.dict_data[client_uuid] = (dict_by_client, count_message+ 1)
+        self.dict_data_lock.release()
 
-    def _process_eof(self, client_uuid):
-        logging.info(f"Routing data messages")
-        for (current_client_uuid, _), final_fruit_item in self.amount_by_fruit.items():
-            data_output_exchange = self._select_data_output_exchange(
-                current_client_uuid, final_fruit_item.fruit
-            )
-            data_output_exchange.send(
-                message_protocol.internal.serialize(
-                    [current_client_uuid, final_fruit_item.fruit, final_fruit_item.amount]
-                )
-            )
-
-        logging.info(f"Broadcasting EOF message")
-        for data_output_exchange in self.data_output_exchanges:
-            data_output_exchange.send(message_protocol.internal.serialize([client_uuid]))
-
+    def _process_eof(self, client_uuid, total_count):
+        logging.info(f"Process EOF, sending control message to control layer")
+        self.control_output_exchange.send(message_protocol.internal.serialize([client_uuid, total_count]))
 
     def process_data_messsage(self, message, ack, nack):
         fields = message_protocol.internal.deserialize(message)
         if len(fields) == 3:
             self._process_data(*fields)
+        elif len(fields) == 2:
+            self._process_eof(*fields)
         else:
-            self._process_eof_client(*fields)
+            logging.info(f"Received invalid message, ignoring")
+            
         ack()
     
-    def process_control_message(self, message, ack, nack):
-        logging.info(f"Process control message")
-        fields = message_protocol.internal.deserialize(message)
-        if len(fields) == 1:
-            self._process_eof(*fields)
-        ack()
+    def _control_thread(self):
+        sum_control = SumControlLayer(self.dict_data_lock, self.dict_data)
+        sum_control.start()
 
-    def _process_eof_client(self, client_uuid):
-        logging.info(f"Broadcasting EOF message to sums")
-        self.control_exchange.send(message_protocol.internal.serialize([client_uuid]))
-
-    def _select_data_output_exchange(self, client_uuid, fruit):
-        hash_input = f"{client_uuid}:{fruit}".encode("utf-8")
-        hash_value = int(hashlib.sha256(hash_input).hexdigest(), 16)
-        selected_index = hash_value % AGGREGATION_AMOUNT
-        return self.data_output_exchanges[selected_index]
 
     def start(self):
-        self.input_queue.start_consuming(self.process_data_messsage, self.process_control_message, self.control_exchange.get_queue_name())
+        self.input_queue.start_consuming(self.process_data_messsage)
 
+    def close(self):
+        pass
 def main():
     logging.basicConfig(level=logging.INFO)
     sum_filter = SumFilter()
