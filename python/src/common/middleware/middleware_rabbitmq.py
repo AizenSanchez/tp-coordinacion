@@ -36,6 +36,14 @@ class MessageMiddlewareQueueRabbitMQ(MessageMiddlewareQueue):
         except Exception as e:
             raise MessageMiddlewareMessageError() from e
 
+    def stop_consuming_threadsafe(self):
+        try:
+            self.connection.add_callback_threadsafe(self.channel.stop_consuming)
+        except pika.exceptions.ConnectionClosed:
+            raise MessageMiddlewareDisconnectedError()
+        except Exception as e:
+            raise MessageMiddlewareMessageError() from e
+
     def send(self, message):
         try:
             self.channel.basic_publish(exchange='', routing_key=self.queue_name, body=message)
@@ -88,6 +96,14 @@ class MessageMiddlewareExchangeRabbitMQ(MessageMiddlewareExchange):
     def stop_consuming(self):
         try:
             self.channel.stop_consuming()
+        except pika.exceptions.ConnectionClosed:
+            raise MessageMiddlewareDisconnectedError()
+        except Exception as e:
+            raise MessageMiddlewareMessageError() from e
+
+    def stop_consuming_threadsafe(self):
+        try:
+            self.connection.add_callback_threadsafe(self.channel.stop_consuming)
         except pika.exceptions.ConnectionClosed:
             raise MessageMiddlewareDisconnectedError()
         except Exception as e:

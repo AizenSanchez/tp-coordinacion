@@ -15,6 +15,7 @@ AGGREGATION_PREFIX = os.environ["AGGREGATION_PREFIX"]
 
 class SumControlLayer:
     def __init__(self, dict_data_lock, dict_data):
+        
         self.dict_data_lock: threading.Lock = dict_data_lock
         self.dict_data: dict[str, tuple[dict[str, fruit_item.FruitItem], int]] = dict_data
         self.data_output_exchanges: list[middleware.MessageMiddlewareExchangeRabbitMQ] = []
@@ -35,6 +36,9 @@ class SumControlLayer:
             MOM_HOST, SUM_CONTROL_EXCHANGE, [f"{SUM_CONTROL_EXCHANGE}_{ID}"]
         )
         self.data_global_count: dict[str, tuple[int, int]] = {}
+
+    def stop(self):
+        self.control_input_exchange.stop_consuming_threadsafe()
     
     def _ask_for_local_counts(self, client_uuid, data_total_count):
         logging.info(f"Asking for local counts from sums")
@@ -104,3 +108,11 @@ class SumControlLayer:
 
     def start(self):
         self.control_input_exchange.start_consuming(self._process_control_message)
+
+    def close(self):
+        logging.info("Closing control layer")
+        self.control_input_exchange.close()
+        for control_output_exchange in self.control_output_exchanges:
+            control_output_exchange.close()
+        for data_output_exchange in self.data_output_exchanges:
+            data_output_exchange.close()

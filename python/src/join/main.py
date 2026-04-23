@@ -3,6 +3,7 @@ import logging
 import heapq
 import sys
 from common import middleware, message_protocol, fruit_item
+import signal 
 
 MOM_HOST = os.environ["MOM_HOST"]
 INPUT_QUEUE = os.environ["INPUT_QUEUE"]
@@ -17,6 +18,7 @@ TOP_SIZE = int(os.environ["TOP_SIZE"])
 class JoinFilter:
 
     def __init__(self):
+        signal.signal(signal.SIGTERM, self._graceful_exit)
         self.input_queue = middleware.MessageMiddlewareQueueRabbitMQ(
             MOM_HOST, INPUT_QUEUE
         )
@@ -38,6 +40,7 @@ class JoinFilter:
         if self.top_by_client[client_uuid][1] == AGGREGATION_AMOUNT:
             fruit_top = self.top_by_client[client_uuid][0]
             self.output_queue.send(message_protocol.internal.serialize([client_uuid, fruit_top]))
+            del self.top_by_client[client_uuid]
         ack()
 
     def start(self):
@@ -59,12 +62,21 @@ class JoinFilter:
                 heapq.heappushpop(heap, fruit_item.FruitItem(fruit, amount))
         return heap
     
+    def _graceful_exit(self, signum, frame):
+        logging.info("Received termination signal, stopping consuming")
+        self.input_queue.stop_consuming()
+
+    def close(self):
+        logging.info("Closing join filter")
+        self.input_queue.close()
+        self.output_queue.close()
+        logging.info("Join filter closed")
 
 def main():
     logging.basicConfig(level=logging.INFO)
     join_filter = JoinFilter()
     join_filter.start()
-
+    join_filter.close()
     return 0
 
 

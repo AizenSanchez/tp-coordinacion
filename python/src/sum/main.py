@@ -17,14 +17,18 @@ AGGREGATION_PREFIX = os.environ["AGGREGATION_PREFIX"]
 
 class SumFilter:
     def __init__(self):
-        #signal.signal(signal.SIGTERM, self.close)
+        
+        signal.signal(signal.SIGTERM, self._graceful_exit)
         self.input_queue = middleware.MessageMiddlewareQueueRabbitMQ(
             MOM_HOST, INPUT_QUEUE
         )
+
         self.dict_data: dict[str, tuple[dict[str, fruit_item.FruitItem], int]] = {}
         self.dict_data_lock = threading.Lock()
         self.thread_control = threading.Thread(target=self._control_thread)
         self.thread_control.start()
+        self.sum_control = None
+
         self.control_output_exchange = middleware.MessageMiddlewareExchangeRabbitMQ(
             MOM_HOST, SUM_CONTROL_EXCHANGE, [f"{SUM_CONTROL_EXCHANGE}_{ID}"]
         )
@@ -55,19 +59,33 @@ class SumFilter:
         ack()
     
     def _control_thread(self):
-        sum_control = SumControlLayer(self.dict_data_lock, self.dict_data)
-        sum_control.start()
+        self.sum_control = SumControlLayer(self.dict_data_lock, self.dict_data)
+        self.sum_control.start()
+        self.sum_control.close()
+
 
 
     def start(self):
         self.input_queue.start_consuming(self.process_data_messsage)
 
+    def _graceful_exit(self, signum, frame):
+        logging.info("Received termination signal, stopping consuming")
+        if self.sum_control is not None:
+            self.sum_control.stop()
+        self.input_queue.stop_consuming()
+        
+
     def close(self):
-        pass
+        logging.info("Closing sum filter")
+        self.input_queue.close()
+        self.control_output_exchange.close()
+        self.thread_control.join()
+
 def main():
     logging.basicConfig(level=logging.INFO)
     sum_filter = SumFilter()
     sum_filter.start()
+    sum_filter.close()
     return 0
 
 

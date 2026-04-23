@@ -1,7 +1,7 @@
 import os
 import logging
 import bisect
-
+import signal
 from common import middleware, message_protocol, fruit_item
 
 ID = int(os.environ["ID"])
@@ -17,6 +17,7 @@ TOP_SIZE = int(os.environ["TOP_SIZE"])
 class AggregationFilter:
 
     def __init__(self):
+        signal.signal(signal.SIGTERM, self._graceful_exit)
         self.input_exchange = middleware.MessageMiddlewareExchangeRabbitMQ(
             MOM_HOST, AGGREGATION_PREFIX, [f"{AGGREGATION_PREFIX}_{ID}"]
         )
@@ -75,11 +76,19 @@ class AggregationFilter:
     def start(self):
         self.input_exchange.start_consuming(self.process_messsage)
 
+    def _graceful_exit(self, signum, frame):
+        logging.info("Received termination signal, stopping consuming")
+        self.input_exchange.stop_consuming()
 
+    def close(self):
+        logging.info("Closing aggregation filter")
+        self.input_exchange.close()
+        self.output_queue.close()
 def main():
     logging.basicConfig(level=logging.INFO)
     aggregation_filter = AggregationFilter()
     aggregation_filter.start()
+    aggregation_filter.close()
     return 0
 
 
